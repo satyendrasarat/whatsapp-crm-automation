@@ -23,9 +23,12 @@ import {
   Trash2,
   Tag,
   Plus,
-  AlertTriangle
+  AlertTriangle,
+  Volume2,
+  VolumeX
 } from 'lucide-react';
 import { api } from '../services/api';
+import { playIncomingBeep, playNeedsHumanAlert, isAudioEnabled, setAudioEnabled } from '../utils/soundEffects';
 
 const PRESET_COLORS = [
   { name: 'Emerald', value: '#10b981' },
@@ -67,6 +70,17 @@ export const LiveChatInbox = () => {
   // Chat Deletion
   const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+
+  // Audio Notifications State
+  const [soundOn, setSoundOn] = useState(() => isAudioEnabled());
+  const toggleSound = () => {
+    const next = !soundOn;
+    setSoundOn(next);
+    setAudioEnabled(next);
+    if (next) {
+      playIncomingBeep();
+    }
+  };
 
   const messagesEndRef = useRef(null);
   const chatScrollContainerRef = useRef(null);
@@ -255,6 +269,7 @@ export const LiveChatInbox = () => {
   useEffect(() => {
     const unsubscribe = api.subscribe((event) => {
       if (event.type === 'incoming_message') {
+        playIncomingBeep();
         const isCurrentChat = selectedJidRef.current && isSameContact(event.from, selectedJidRef.current);
         if (isCurrentChat && event.text) {
           setMessages((prev) => {
@@ -320,6 +335,7 @@ export const LiveChatInbox = () => {
           }));
         }
       } else if (event.type === 'human_handover_requested') {
+        playNeedsHumanAlert();
         loadConversations();
         if (isSameContact(event.chatJid, selectedJidRef.current)) {
           setActiveContactStatus({
@@ -555,16 +571,29 @@ export const LiveChatInbox = () => {
               <MessageSquare className="w-4 h-4 text-emerald-400" />
               <span>Live Chat Inbox</span>
             </h2>
-            <button
-              onClick={() => {
-                loadConversations();
-                loadLabels();
-              }}
-              className="p-1.5 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded-lg transition"
-              title="Refresh conversations"
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-            </button>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={toggleSound}
+                className={`p-1.5 rounded-lg border transition ${
+                  soundOn
+                    ? 'bg-emerald-950/60 border-emerald-500/40 text-emerald-400 hover:bg-emerald-900/60'
+                    : 'bg-slate-800/80 border-slate-700 text-slate-500 hover:text-slate-300'
+                }`}
+                title={soundOn ? 'Audio Alerts: ON (Click to mute)' : 'Audio Alerts: MUTED (Click to unmute)'}
+              >
+                {soundOn ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
+              </button>
+              <button
+                onClick={() => {
+                  loadConversations();
+                  loadLabels();
+                }}
+                className="p-1.5 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded-lg transition"
+                title="Refresh conversations"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
 
           <div className="relative">

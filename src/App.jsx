@@ -11,6 +11,7 @@ import AIAssistant from './pages/AIAssistant';
 import Settings from './pages/Settings';
 import LiveChatInbox from './pages/LiveChatInbox';
 import { api } from './services/api';
+import { playNeedsHumanAlert } from './utils/soundEffects';
 
 export function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -47,6 +48,8 @@ export function App() {
         )
       ) {
         fetchGlobalState();
+      } else if (event.type === 'human_handover_requested') {
+        playNeedsHumanAlert();
       }
     });
 
