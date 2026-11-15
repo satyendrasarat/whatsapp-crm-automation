@@ -211,9 +211,11 @@ export const LiveChatInbox = () => {
     }
   };
 
-  const loadMessages = async (jid) => {
+  const loadMessages = async (jid, isBackground = false) => {
     if (!jid) return;
-    setIsLoadingMessages(true);
+    if (!isBackground) {
+      setIsLoadingMessages(true);
+    }
     try {
       const [msgRes, statusRes] = await Promise.all([
         api.getConversationMessages(jid, 150),
@@ -229,7 +231,9 @@ export const LiveChatInbox = () => {
     } catch (err) {
       console.error('Failed to load messages for jid:', jid, err);
     } finally {
-      setIsLoadingMessages(false);
+      if (!isBackground) {
+        setIsLoadingMessages(false);
+      }
       scrollToBottom();
     }
   };
@@ -243,7 +247,7 @@ export const LiveChatInbox = () => {
 
   useEffect(() => {
     if (selectedJid) {
-      loadMessages(selectedJid);
+      loadMessages(selectedJid, false);
     }
   }, [selectedJid]);
 
@@ -251,14 +255,60 @@ export const LiveChatInbox = () => {
   useEffect(() => {
     const unsubscribe = api.subscribe((event) => {
       if (event.type === 'incoming_message') {
+        const isCurrentChat = selectedJidRef.current && isSameContact(event.from, selectedJidRef.current);
+        if (isCurrentChat && event.text) {
+          setMessages((prev) => {
+            const isDup = prev.some((m) => (event.id && m.id === event.id) || (m.message_text === event.text && m.direction === 'incoming' && Math.abs(new Date(m.timestamp || Date.now()) - new Date(event.timestamp || Date.now())) < 3000));
+            if (isDup) return prev;
+            return [...prev, {
+              id: event.id || Date.now(),
+              from_jid: event.from,
+              to_jid: 'me',
+              message_text: event.text,
+              direction: 'incoming',
+              timestamp: event.timestamp || new Date().toISOString()
+            }];
+          });
+          scrollToBottom();
+        }
+        setConversations((prev) =>
+          prev.map((c) =>
+            isSameContact(c, event.from)
+              ? { ...c, last_message: event.text, last_direction: 'incoming', last_timestamp: new Date().toISOString() }
+              : c
+          )
+        );
         loadConversations();
         if (selectedJidRef.current) {
-          loadMessages(selectedJidRef.current);
+          loadMessages(selectedJidRef.current, true);
         }
       } else if (event.type === 'outgoing_message') {
+        const isCurrentChat = selectedJidRef.current && isSameContact(event.to, selectedJidRef.current);
+        if (isCurrentChat && event.text) {
+          setMessages((prev) => {
+            const isDup = prev.some((m) => (event.id && m.id === event.id) || (m.message_text === event.text && m.direction === 'outgoing' && Math.abs(new Date(m.timestamp || Date.now()) - new Date(event.timestamp || Date.now())) < 3000));
+            if (isDup) return prev;
+            return [...prev, {
+              id: event.id || Date.now(),
+              from_jid: 'me',
+              to_jid: event.to,
+              message_text: event.text,
+              direction: 'outgoing',
+              timestamp: event.timestamp || new Date().toISOString()
+            }];
+          });
+          scrollToBottom();
+        }
+        setConversations((prev) =>
+          prev.map((c) =>
+            isSameContact(c, event.to)
+              ? { ...c, last_message: event.text, last_direction: 'outgoing', last_timestamp: new Date().toISOString() }
+              : c
+          )
+        );
         loadConversations();
         if (selectedJidRef.current) {
-          loadMessages(selectedJidRef.current);
+          loadMessages(selectedJidRef.current, true);
         }
       } else if (event.type === 'bot_status_changed') {
         loadConversations();

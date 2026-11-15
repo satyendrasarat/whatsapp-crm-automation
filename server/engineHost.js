@@ -72,6 +72,20 @@ function cacheMessage(id, message) {
     messageStore.set(id, message);
 }
 
+// Global deduplication trackers to prevent double-processing and duplicate UI messages
+const sentMessageIds = new Set();
+const processedMessageIds = new Set();
+const MAX_TRACKED_IDS = 5000;
+
+function trackId(set, id) {
+    if (!id) return;
+    if (set.size >= MAX_TRACKED_IDS) {
+        const oldest = set.values().next().value;
+        set.delete(oldest);
+    }
+    set.add(id);
+}
+
 export class EngineHost {
     constructor() {
         this.sessions = new Map(); // sessionId -> { sock, qr, status, phoneNumber }
@@ -269,26 +283,50 @@ export class EngineHost {
                     }
                 }
 
-                if (type !== 'notify' && type !== 'append') return;
-
                 for (const msg of messages) {
                     if (msg.key.fromMe) {
+                        const msgId = msg.key?.id;
+                        // If this message was dispatched by our server (via sendText / quick dispatch / bot reply),
+                        // it was already logged and broadcasted. Skip to prevent duplicate bubble!
+                        if (msgId && sentMessageIds.has(msgId)) {
+                            continue;
+                        }
+                        if (msgId) {
+                            trackId(sentMessageIds, msgId);
+                        }
+
                         const toJid = msg.key.remoteJid;
                         if (toJid && toJid !== 'status@broadcast' && !toJid.endsWith('@g.us') && !toJid.endsWith('@newsletter')) {
                             const text = extractMessageText(msg);
                             if (text) {
-                                chatLogsDao.log(sessionId, 'me', toJid, text, 'outgoing');
-                                this.broadcast({
-                                    type: 'outgoing_message',
-                                    sessionId,
-                                    to: toJid,
-                                    text,
-                                    timestamp: new Date()
-                                });
+                                const logRes = chatLogsDao.log(sessionId, 'me', toJid, text, 'outgoing');
+                                if (!logRes?.isDuplicate) {
+                                    this.broadcast({
+                                        type: 'outgoing_message',
+                                        id: logRes?.id,
+                                        sessionId,
+                                        to: toJid,
+                                        text,
+                                        timestamp: new Date()
+                                    });
+                                }
                             }
                         }
                         continue;
                     }
+
+                    // For incoming messages: ONLY process 'notify' events to avoid re-triggering on synced history
+                    if (type !== 'notify') continue;
+
+                    // Deduplicate incoming message IDs
+                    const incomingMsgId = msg.key?.id;
+                    if (incomingMsgId) {
+                        if (processedMessageIds.has(incomingMsgId)) {
+                            continue;
+                        }
+                        trackId(processedMessageIds, incomingMsgId);
+                    }
+
                     const fromJid = msg.key.remoteJid;
                     if (!fromJid || fromJid === 'status@broadcast') continue;
 
@@ -327,16 +365,19 @@ export class EngineHost {
                     const senderPhone = fromJid.split('@')[0];
                     console.log(`[WhatsApp Inbound] Received from ${fromJid} (${senderPhone}${pushName ? ` - ${pushName}` : ''}): "${messageText}"`);
 
-                    // 1. Log incoming message
-                    chatLogsDao.log(sessionId, fromJid, 'me', messageText, 'incoming');
-                    this.broadcast({
-                        type: 'incoming_message',
-                        sessionId,
-                        from: fromJid,
-                        senderPhone,
-                        text: messageText,
-                        timestamp: new Date()
-                    });
+                    // 1. Log incoming message (with deduplication check)
+                    const logRes = chatLogsDao.log(sessionId, fromJid, 'me', messageText, 'incoming');
+                    if (!logRes?.isDuplicate) {
+                        this.broadcast({
+                            type: 'incoming_message',
+                            id: logRes?.id,
+                            sessionId,
+                            from: fromJid,
+                            senderPhone,
+                            text: messageText,
+                            timestamp: new Date()
+                        });
+                    }
 
                     // 1b. Check if bot is disabled for this specific customer (Human Agent Takeover)
                     if (conversationStatusDao.isBotDisabled(fromJid)) {
@@ -566,19 +607,25 @@ export class EngineHost {
         }
 
         // Cache outgoing message so Baileys can satisfy Signal Protocol retry requests
-        if (result?.key?.id && result?.message) {
-            cacheMessage(result.key.id, result.message);
+        if (result?.key?.id) {
+            trackId(sentMessageIds, result.key.id);
+            if (result.message) {
+                cacheMessage(result.key.id, result.message);
+            }
         }
 
-        // Log outgoing message
-        chatLogsDao.log(sessionId, 'me', jid, message, 'outgoing');
-        this.broadcast({
-            type: 'outgoing_message',
-            sessionId,
-            to: jid,
-            text: message,
-            timestamp: new Date()
-        });
+        // Log outgoing message (with deduplication safeguard)
+        const logRes = chatLogsDao.log(sessionId, 'me', jid, message, 'outgoing');
+        if (!logRes?.isDuplicate) {
+            this.broadcast({
+                type: 'outgoing_message',
+                id: logRes?.id,
+                sessionId,
+                to: jid,
+                text: message,
+                timestamp: new Date()
+            });
+        }
 
         return result;
     }

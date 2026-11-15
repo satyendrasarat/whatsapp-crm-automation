@@ -587,10 +587,25 @@ export const sessionsDao = {
 // Chat Logs DAO
 export const chatLogsDao = {
     log: (sessionId, fromJid, toJid, text, direction) => {
-        return db.prepare(`
+        // Prevent duplicate logging of identical messages within 3 seconds
+        try {
+            const recent = db.prepare(`
+                SELECT id FROM chat_logs 
+                WHERE message_text = ? AND direction = ?
+                  AND (from_jid = ? OR to_jid = ? OR from_jid = ? OR to_jid = ?)
+                  AND timestamp >= datetime('now', '-3 seconds')
+                ORDER BY id DESC LIMIT 1
+            `).get(text, direction, fromJid, toJid, toJid, fromJid);
+            if (recent) {
+                return { id: recent.id, isDuplicate: true };
+            }
+        } catch (_) {}
+
+        const res = db.prepare(`
             INSERT INTO chat_logs (session_id, from_jid, to_jid, message_text, direction)
             VALUES (?, ?, ?, ?, ?)
         `).run(sessionId, fromJid, toJid, text, direction);
+        return { id: res.lastInsertRowid, isDuplicate: false };
     },
     getRecent: (limit = 100) => {
         return db.prepare('SELECT * FROM chat_logs ORDER BY id DESC LIMIT ?').all(limit);
