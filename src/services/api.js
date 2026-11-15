@@ -95,10 +95,10 @@ class ApiService {
     });
   }
 
-  sendDirectMessage(toPhone, message, sessionId = 'default', mediaUrl = null) {
-    return this.request('/sessions/send-direct', {
+  sendDirectMessage(jid, messageText, sessionId = 'default', mediaUrl = null) {
+    return this.request('/chat/send', {
       method: 'POST',
-      body: JSON.stringify({ toPhone, message, sessionId, mediaUrl })
+      body: JSON.stringify({ jid, messageText, sessionId, mediaUrl })
     });
   }
 
@@ -335,13 +335,6 @@ class ApiService {
 
   getConversationMessages(jid, limit = 100) {
     return this.request(`/chat/messages?jid=${encodeURIComponent(jid)}&limit=${limit}`);
-  }
-
-  sendDirectMessage(jid, messageText, sessionId = 'default') {
-    return this.request('/chat/send', {
-      method: 'POST',
-      body: JSON.stringify({ jid, messageText, sessionId })
-    });
   }
 
   toggleCustomerBot(jid, botDisabled) {

@@ -597,20 +597,35 @@ export const chatLogsDao = {
     },
     getConversations: () => {
         const rows = db.prepare(`
-            WITH RankedChats AS (
+            WITH RawChats AS (
                 SELECT 
-                    id,
-                    session_id,
-                    CASE WHEN direction = 'incoming' THEN from_jid ELSE to_jid END AS contact_jid,
-                    message_text,
-                    direction,
-                    timestamp,
+                    cl.id,
+                    cl.session_id,
+                    CASE WHEN cl.direction = 'incoming' THEN cl.from_jid ELSE cl.to_jid END AS contact_jid,
+                    cl.message_text,
+                    cl.direction,
+                    cl.timestamp
+                FROM chat_logs cl
+                WHERE (cl.from_jid != 'me' AND cl.from_jid IS NOT NULL) OR (cl.to_jid != 'me' AND cl.to_jid IS NOT NULL)
+            ),
+            ResolvedChats AS (
+                SELECT 
+                    rc.*,
+                    COALESCE(
+                        lm.phone_number,
+                        NULLIF(REPLACE(REPLACE(REPLACE(REPLACE(rc.contact_jid, '@s.whatsapp.net', ''), '@c.us', ''), '+', ''), ' ', ''), ''),
+                        rc.contact_jid
+                    ) as canonical_id,
                     ROW_NUMBER() OVER (
-                        PARTITION BY CASE WHEN direction = 'incoming' THEN from_jid ELSE to_jid END 
-                        ORDER BY id DESC
+                        PARTITION BY COALESCE(
+                            lm.phone_number,
+                            NULLIF(REPLACE(REPLACE(REPLACE(REPLACE(rc.contact_jid, '@s.whatsapp.net', ''), '@c.us', ''), '+', ''), ' ', ''), ''),
+                            rc.contact_jid
+                        )
+                        ORDER BY rc.id DESC
                     ) as rn
-                FROM chat_logs
-                WHERE (from_jid != 'me' AND from_jid IS NOT NULL) OR (to_jid != 'me' AND to_jid IS NOT NULL)
+                FROM RawChats rc
+                LEFT JOIN lid_mappings lm ON lm.lid = rc.contact_jid
             )
             SELECT 
                 rc.id,
@@ -619,14 +634,15 @@ export const chatLogsDao = {
                 rc.message_text AS last_message,
                 rc.direction AS last_direction,
                 rc.timestamp AS last_timestamp,
-                COALESCE(c.name, lm.push_name, '') AS contact_name,
-                lm.phone_number AS resolved_phone,
-                lm.push_name AS push_name,
+                COALESCE(c.name, lm.push_name, lm_rev.push_name, '') AS contact_name,
+                COALESCE(lm.phone_number, lm_rev.phone_number) AS resolved_phone,
+                COALESCE(lm.push_name, lm_rev.push_name) AS push_name,
                 MAX(COALESCE(cs.bot_disabled, 0)) AS bot_disabled,
                 MAX(COALESCE(cs.human_agent_requested, 0)) AS human_agent_requested,
                 GROUP_CONCAT(DISTINCT cl.label_name) AS labels
-            FROM RankedChats rc
+            FROM ResolvedChats rc
             LEFT JOIN lid_mappings lm ON lm.lid = rc.contact_jid
+            LEFT JOIN lid_mappings lm_rev ON (lm_rev.phone_number = REPLACE(REPLACE(rc.contact_jid, '@s.whatsapp.net', ''), '@c.us', ''))
             LEFT JOIN contacts c ON (
                 c.phone = REPLACE(REPLACE(REPLACE(REPLACE(rc.contact_jid, '@s.whatsapp.net', ''), '@c.us', ''), '+', ''), ' ', '')
                 OR (lm.phone_number IS NOT NULL AND c.phone = lm.phone_number)
@@ -635,14 +651,16 @@ export const chatLogsDao = {
                 cs.chat_jid = rc.contact_jid
                 OR (lm.phone_jid IS NOT NULL AND cs.chat_jid = lm.phone_jid)
                 OR (lm.phone_number IS NOT NULL AND cs.chat_jid = lm.phone_number || '@s.whatsapp.net')
+                OR (lm_rev.lid IS NOT NULL AND cs.chat_jid = lm_rev.lid)
             )
             LEFT JOIN conversation_labels cl ON (
                 cl.chat_jid = rc.contact_jid
                 OR (lm.phone_jid IS NOT NULL AND cl.chat_jid = lm.phone_jid)
                 OR (lm.phone_number IS NOT NULL AND cl.chat_jid = lm.phone_number || '@s.whatsapp.net')
+                OR (lm_rev.lid IS NOT NULL AND cl.chat_jid = lm_rev.lid)
             )
             WHERE rc.rn = 1
-            GROUP BY rc.contact_jid
+            GROUP BY rc.canonical_id
             ORDER BY rc.id DESC
         `).all();
 
@@ -670,15 +688,17 @@ export const chatLogsDao = {
         return { deletedJids: jids };
     },
     getMessagesForJid: (jid, limit = 100) => {
+        const jids = getRelatedJids(jid);
+        const placeholders = jids.map(() => '?').join(',');
         return db.prepare(`
             SELECT * FROM (
                 SELECT * FROM chat_logs
-                WHERE from_jid = ? OR to_jid = ?
+                WHERE from_jid IN (${placeholders}) OR to_jid IN (${placeholders})
                 ORDER BY id DESC
                 LIMIT ?
             )
             ORDER BY id ASC
-        `).all(jid, jid, limit);
+        `).all(...jids, ...jids, limit);
     }
 };
 
@@ -722,19 +742,23 @@ export const conversationStatusDao = {
         const placeholders = jids.map(() => '?').join(',');
         const row = db.prepare(`
             SELECT 
-                MAX(COALESCE(bot_disabled, 0)) as bot_disabled,
-                MAX(COALESCE(human_agent_requested, 0)) as human_agent_requested,
+                COALESCE(MAX(bot_disabled), 0) as bot_disabled,
+                COALESCE(MAX(human_agent_requested), 0) as human_agent_requested,
                 GROUP_CONCAT(notes) as notes
             FROM conversation_status 
             WHERE chat_jid IN (${placeholders})
         `).get(...jids);
-        return row || { bot_disabled: 0, human_agent_requested: 0, notes: null };
+        return {
+            bot_disabled: row?.bot_disabled ? 1 : 0,
+            human_agent_requested: row?.human_agent_requested ? 1 : 0,
+            notes: row?.notes || null
+        };
     },
     isBotDisabled: (chatJid) => {
         const jids = getRelatedJids(chatJid);
         const placeholders = jids.map(() => '?').join(',');
         const row = db.prepare(`
-            SELECT MAX(COALESCE(bot_disabled, 0)) as bot_disabled 
+            SELECT COALESCE(MAX(bot_disabled), 0) as bot_disabled 
             FROM conversation_status 
             WHERE chat_jid IN (${placeholders})
         `).get(...jids);
@@ -747,7 +771,11 @@ export const conversationStatusDao = {
             VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(chat_jid) DO UPDATE SET
                 bot_disabled = excluded.bot_disabled,
-                human_agent_requested = CASE WHEN excluded.human_agent_requested = 1 THEN 1 ELSE conversation_status.human_agent_requested END,
+                human_agent_requested = CASE 
+                    WHEN excluded.bot_disabled = 0 THEN 0 
+                    WHEN excluded.human_agent_requested = 1 THEN 1 
+                    ELSE conversation_status.human_agent_requested 
+                END,
                 notes = COALESCE(excluded.notes, conversation_status.notes),
                 updated_at = CURRENT_TIMESTAMP
         `);
@@ -755,9 +783,16 @@ export const conversationStatusDao = {
             stmt.run(j, botDisabled ? 1 : 0, humanAgentRequested ? 1 : 0, notes);
         }
     },
-    clearHumanRequested: (chatJid) => {
+    clearHumanRequested: (chatJid, alsoEnableBot = true) => {
         const jids = getRelatedJids(chatJid);
         const placeholders = jids.map(() => '?').join(',');
+        if (alsoEnableBot) {
+            return db.prepare(`
+                UPDATE conversation_status 
+                SET human_agent_requested = 0, bot_disabled = 0, updated_at = CURRENT_TIMESTAMP 
+                WHERE chat_jid IN (${placeholders})
+            `).run(...jids);
+        }
         return db.prepare(`
             UPDATE conversation_status 
             SET human_agent_requested = 0, updated_at = CURRENT_TIMESTAMP 

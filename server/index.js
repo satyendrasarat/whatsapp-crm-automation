@@ -790,7 +790,7 @@ app.get('/api/chat/messages', (req, res) => {
 });
 
 app.post('/api/chat/send', async (req, res) => {
-    const { sessionId = 'default', jid, messageText } = req.body;
+    const { sessionId = 'default', jid, messageText, mediaUrl } = req.body;
     if (!jid || !messageText) {
         return res.status(400).json({ error: 'Both jid and messageText are required' });
     }
@@ -812,7 +812,7 @@ app.post('/api/chat/send', async (req, res) => {
             return res.status(400).json({ error: 'No active WhatsApp session is currently connected to send messages' });
         }
 
-        await engineHost.sendText(targetSessionId, jid, messageText);
+        await engineHost.sendText(targetSessionId, jid, messageText, mediaUrl || null);
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -839,10 +839,11 @@ app.post('/api/chat/resolve-human-request', (req, res) => {
     const { jid } = req.body;
     if (!jid) return res.status(400).json({ error: 'JID is required' });
     try {
-        conversationStatusDao.clearHumanRequested(jid);
+        conversationStatusDao.clearHumanRequested(jid, true);
         engineHost.broadcast({
             type: 'human_request_resolved',
-            chatJid: jid
+            chatJid: jid,
+            botDisabled: false
         });
         res.json({ success: true });
     } catch (e) {

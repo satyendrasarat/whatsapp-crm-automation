@@ -129,6 +129,23 @@ export const LiveChatInbox = () => {
     return { name: displayName, subtitle, isLid, avatarChar, rawNumber, resolvedPhone, originalName: name };
   };
 
+  // Cross-Identity Matcher (Matches JID, LID, Phone number symmetrically)
+  const isSameContact = (c, targetJid, extraPhone = null) => {
+    if (!c || !targetJid) return false;
+    const cJid = typeof c === 'string' ? c : (c.contact_jid || '');
+    if (cJid === targetJid) return true;
+    const cleanTarget = targetJid.replace(/@.*$/, '').replace(/\D/g, '');
+    const cleanC = cJid.replace(/@.*$/, '').replace(/\D/g, '');
+    if (cleanTarget && cleanTarget === cleanC) return true;
+
+    const resolved = typeof c === 'object' ? (c.resolved_phone || extraPhone) : extraPhone;
+    if (resolved) {
+      const cleanResolved = String(resolved).replace(/\D/g, '');
+      if (cleanResolved && (cleanResolved === cleanTarget || cleanResolved === cleanC)) return true;
+    }
+    return false;
+  };
+
   const openEditModal = (conv) => {
     if (!conv) return;
     const info = getContactDisplay(conv);
@@ -168,8 +185,8 @@ export const LiveChatInbox = () => {
             human_agent_requested: res.conversations[0].human_agent_requested
           });
         } else if (currentActive) {
-          // Keep the user's active contact selection untouched!
-          const current = res.conversations.find((c) => c.contact_jid === currentActive);
+          // Keep the user's active contact selection untouched across LID and phone identity changes!
+          const current = res.conversations.find((c) => isSameContact(c, currentActive));
           if (current) {
             setActiveContactStatus({
               bot_disabled: current.bot_disabled,
@@ -234,33 +251,27 @@ export const LiveChatInbox = () => {
   useEffect(() => {
     const unsubscribe = api.subscribe((event) => {
       if (event.type === 'incoming_message') {
-        const fromJid = event.from;
         loadConversations();
-        if (selectedJidRef.current === fromJid) {
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: Date.now(),
-              from_jid: fromJid,
-              to_jid: 'me',
-              message_text: event.text,
-              direction: 'incoming',
-              timestamp: new Date().toISOString()
-            }
-          ]);
-          scrollToBottom();
+        if (selectedJidRef.current) {
+          loadMessages(selectedJidRef.current);
+        }
+      } else if (event.type === 'outgoing_message') {
+        loadConversations();
+        if (selectedJidRef.current) {
+          loadMessages(selectedJidRef.current);
         }
       } else if (event.type === 'bot_status_changed') {
-        if (event.chatJid === selectedJidRef.current) {
+        loadConversations();
+        if (isSameContact(event.chatJid, selectedJidRef.current)) {
           setActiveContactStatus((prev) => ({
             ...prev,
-            bot_disabled: event.botDisabled ? 1 : 0
+            bot_disabled: event.botDisabled ? 1 : 0,
+            human_agent_requested: event.botDisabled ? prev.human_agent_requested : 0
           }));
         }
-        loadConversations();
       } else if (event.type === 'human_handover_requested') {
         loadConversations();
-        if (event.chatJid === selectedJidRef.current) {
+        if (isSameContact(event.chatJid, selectedJidRef.current)) {
           setActiveContactStatus({
             human_agent_requested: 1,
             bot_disabled: 1
@@ -268,14 +279,14 @@ export const LiveChatInbox = () => {
         }
       } else if (event.type === 'human_request_resolved') {
         loadConversations();
-        if (event.chatJid === selectedJidRef.current) {
-          setActiveContactStatus((prev) => ({
-            ...prev,
-            human_agent_requested: 0
-          }));
+        if (isSameContact(event.chatJid, selectedJidRef.current)) {
+          setActiveContactStatus({
+            human_agent_requested: 0,
+            bot_disabled: 0
+          });
         }
       } else if (event.type === 'conversation_deleted') {
-        if (event.chatJid === selectedJidRef.current) {
+        if (isSameContact(event.chatJid, selectedJidRef.current)) {
           setSelectedJid(null);
           selectedJidRef.current = null;
           setMessages([]);
@@ -340,11 +351,14 @@ export const LiveChatInbox = () => {
       await api.toggleCustomerBot(selectedJid, newDisabledState);
       setActiveContactStatus((prev) => ({
         ...prev,
-        bot_disabled: newDisabledState ? 1 : 0
+        bot_disabled: newDisabledState ? 1 : 0,
+        human_agent_requested: newDisabledState ? prev.human_agent_requested : 0
       }));
       setConversations((prev) =>
         prev.map((c) =>
-          c.contact_jid === selectedJid ? { ...c, bot_disabled: newDisabledState ? 1 : 0 } : c
+          isSameContact(c, selectedJid)
+            ? { ...c, bot_disabled: newDisabledState ? 1 : 0, human_agent_requested: newDisabledState ? c.human_agent_requested : 0 }
+            : c
         )
       );
     } catch (err) {
@@ -356,13 +370,15 @@ export const LiveChatInbox = () => {
     if (!selectedJid) return;
     try {
       await api.resolveHumanRequest(selectedJid);
-      setActiveContactStatus((prev) => ({
-        ...prev,
+      setActiveContactStatus({
+        bot_disabled: 0,
         human_agent_requested: 0
-      }));
+      });
       setConversations((prev) =>
         prev.map((c) =>
-          c.contact_jid === selectedJid ? { ...c, human_agent_requested: 0 } : c
+          isSameContact(c, selectedJid)
+            ? { ...c, human_agent_requested: 0, bot_disabled: 0 }
+            : c
         )
       );
     } catch (err) {
@@ -373,7 +389,7 @@ export const LiveChatInbox = () => {
   // Label Management: Toggle label on active conversation
   const handleToggleLabel = async (labelName) => {
     if (!selectedJid) return;
-    const selectedConv = conversations.find((c) => c.contact_jid === selectedJid);
+    const selectedConv = conversations.find((c) => isSameContact(c, selectedJid));
     const currentLabels = Array.isArray(selectedConv?.labels) ? selectedConv.labels : [];
     const nextLabels = currentLabels.includes(labelName)
       ? currentLabels.filter((l) => l !== labelName)
@@ -382,7 +398,7 @@ export const LiveChatInbox = () => {
     // Optimistically update conversations in state
     setConversations((prev) =>
       prev.map((c) =>
-        c.contact_jid === selectedJid ? { ...c, labels: nextLabels } : c
+        isSameContact(c, selectedJid) ? { ...c, labels: nextLabels } : c
       )
     );
 
@@ -475,7 +491,7 @@ export const LiveChatInbox = () => {
     return true;
   });
 
-  const selectedConversation = conversations.find((c) => c.contact_jid === selectedJid);
+  const selectedConversation = conversations.find((c) => isSameContact(c, selectedJid));
   const selectedContactInfo = getContactDisplay(selectedConversation || (selectedJid ? { contact_jid: selectedJid } : null));
 
   return (
@@ -623,7 +639,7 @@ export const LiveChatInbox = () => {
           ) : (
             filteredConversations.map((conv) => {
               const contactInfo = getContactDisplay(conv);
-              const isSelected = selectedJid === conv.contact_jid;
+              const isSelected = isSameContact(conv, selectedJid);
               const isHumanRequested = conv.human_agent_requested === 1;
               const isBotDisabled = conv.bot_disabled === 1;
 

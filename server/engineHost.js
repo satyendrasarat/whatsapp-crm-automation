@@ -47,6 +47,13 @@ function extractMessageText(msg) {
         m.listResponseMessage?.singleSelectReply?.selectedRowId ||
         m.templateButtonReplyMessage?.selectedId ||
         m.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson ||
+        (m.audioMessage ? (m.audioMessage.ptt ? '🎤 [Voice Note]' : '🎵 [Audio Message]') : '') ||
+        (m.imageMessage ? '📷 [Photo]' : '') ||
+        (m.videoMessage ? '🎥 [Video]' : '') ||
+        (m.documentMessage ? `📄 [Document: ${m.documentMessage.fileName || 'file'}]` : '') ||
+        (m.stickerMessage ? '🎨 [Sticker]' : '') ||
+        (m.contactMessage || m.contactsArrayMessage ? '👤 [Contact Card]' : '') ||
+        (m.locationMessage || m.liveLocationMessage ? '📍 [Location]' : '') ||
         ''
     ).trim();
 }
@@ -265,7 +272,23 @@ export class EngineHost {
                 if (type !== 'notify' && type !== 'append') return;
 
                 for (const msg of messages) {
-                    if (msg.key.fromMe) continue;
+                    if (msg.key.fromMe) {
+                        const toJid = msg.key.remoteJid;
+                        if (toJid && toJid !== 'status@broadcast' && !toJid.endsWith('@g.us') && !toJid.endsWith('@newsletter')) {
+                            const text = extractMessageText(msg);
+                            if (text) {
+                                chatLogsDao.log(sessionId, 'me', toJid, text, 'outgoing');
+                                this.broadcast({
+                                    type: 'outgoing_message',
+                                    sessionId,
+                                    to: toJid,
+                                    text,
+                                    timestamp: new Date()
+                                });
+                            }
+                        }
+                        continue;
+                    }
                     const fromJid = msg.key.remoteJid;
                     if (!fromJid || fromJid === 'status@broadcast') continue;
 
