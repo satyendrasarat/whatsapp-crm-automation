@@ -136,6 +136,8 @@ export class EngineHost {
                 markOnlineOnConnect: true,
                 syncFullHistory: false,
                 printQRInTerminal: false,
+                connectTimeoutMs: 60000,
+                defaultQueryTimeoutMs: 90000,
                 generateHighQualityLinkPreview: true,
                 getMessage: async (key) => {
                     if (!key?.id) return undefined;
